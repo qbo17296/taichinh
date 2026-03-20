@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { format } from 'date-fns';
 import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Tooltip, Legend, ArcElement } from 'chart.js';
+import { db } from './firebase';
+import { collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc } from 'firebase/firestore';
 import { Bar, Doughnut } from 'react-chartjs-2';
 import { 
   Wallet, Home, Receipt, PieChart, Users, 
@@ -102,11 +104,12 @@ export default function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem('familyFi_theme') || 'light');
   const [activeTab, setActiveTab] = useState('dashboard');
   
-  const [transactions, setTransactions] = useState(() => JSON.parse(localStorage.getItem('familyFi_transactions')) || []);
-  const [budgets, setBudgets] = useState(() => JSON.parse(localStorage.getItem('familyFi_budgets')) || []);
-  const [incomeGoals, setIncomeGoals] = useState(() => JSON.parse(localStorage.getItem('familyFi_income_goals')) || []);
-  const [members, setMembers] = useState(() => JSON.parse(localStorage.getItem('familyFi_members')) || [{id: 'admin', name: 'Gia đình Vinh (Chung)', role: 'Quản trị viên'}]);
-  const [debts, setDebts] = useState(() => JSON.parse(localStorage.getItem('familyFi_debts')) || []);
+  const [transactions, setTransactions] = useState([]);
+  const [budgets, setBudgets] = useState([]);
+  const [incomeGoals, setIncomeGoals] = useState([]);
+  const [members, setMembers] = useState([]);
+  const [debts, setDebts] = useState([]);
+  const [isFirebaseLoaded, setIsFirebaseLoaded] = useState(false);
 
   // Modals
   const [showTxModal, setShowTxModal] = useState(false);
@@ -130,13 +133,25 @@ export default function App() {
     localStorage.setItem('familyFi_theme', theme);
   }, [theme]);
 
-  // Persist Data
-  useEffect(() => { localStorage.setItem('familyFi_transactions', JSON.stringify(transactions)); }, [transactions]);
-  useEffect(() => { localStorage.setItem('familyFi_budgets', JSON.stringify(budgets)); }, [budgets]);
-  useEffect(() => { localStorage.setItem('familyFi_income_goals', JSON.stringify(incomeGoals)); }, [incomeGoals]);
-  useEffect(() => { localStorage.setItem('familyFi_members', JSON.stringify(members)); }, [members]);
-  useEffect(() => { localStorage.setItem('familyFi_debts', JSON.stringify(debts)); }, [debts]);
+  useEffect(() => {
+    const unsubTx = onSnapshot(collection(db, 'transactions'), snap => setTransactions(snap.docs.map(d => ({id: d.id, ...d.data()})).sort((a,b) => new Date(b.date) - new Date(a.date))));
+    const unsubBg = onSnapshot(collection(db, 'budgets'), snap => setBudgets(snap.docs.map(d => ({id: d.id, ...d.data()}))));
+    const unsubIg = onSnapshot(collection(db, 'incomeGoals'), snap => setIncomeGoals(snap.docs.map(d => ({id: d.id, ...d.data()}))));
+    const unsubMb = onSnapshot(collection(db, 'members'), snap => setMembers(snap.docs.map(d => ({id: d.id, ...d.data()}))));
+    const unsubDb = onSnapshot(collection(db, 'debts'), snap => {
+      setDebts(snap.docs.map(d => ({id: d.id, ...d.data()})));
+      setIsFirebaseLoaded(true);
+    });
+    return () => { unsubTx(); unsubBg(); unsubIg(); unsubMb(); unsubDb(); };
+  }, []);
+
   useEffect(() => { localStorage.setItem('familyFi_weather_city', JSON.stringify(city)); }, [city]);
+
+  useEffect(() => {
+    if(isFirebaseLoaded && members.length === 0) {
+      addDoc(collection(db, 'members'), { name: 'Gia đình Vinh (Mặc định)', role: 'Quản trị viên' });
+    }
+  }, [isFirebaseLoaded, members.length]);
 
   useEffect(() => {
     fetch(`https://api.open-meteo.com/v1/forecast?latitude=${city.lat}&longitude=${city.lon}&current=temperature_2m,weather_code&timezone=Asia%2FBangkok`)
@@ -222,45 +237,49 @@ export default function App() {
   };
 
   // === Handlers ===
-  const handleTxSubmit = (e) => {
+  const handleTxSubmit = async (e) => {
     e.preventDefault();
-    const newTx = { ...txForm, id: uuidv4(), amount: Number(txForm.amount), timestamp: Date.now() };
-    const updated = [...transactions, newTx].sort((a,b) => new Date(b.date) - new Date(a.date));
-    setTransactions(updated);
+    await addDoc(collection(db, 'transactions'), {
+      ...txForm,
+      amount: Number(txForm.amount),
+      timestamp: Date.now()
+    });
     setShowTxModal(false);
     setTxForm({ type: 'expense', amount: '', category: 'food', date: new Date().toISOString().split('T')[0], memberId: 'all', note: '' });
   };
 
-  const handleBudgetSubmit = (e) => {
+  const handleBudgetSubmit = async (e) => {
     e.preventDefault();
-    const updated = [...budgets];
-    const idx = updated.findIndex(b => b.category === budgetForm.category);
-    if(idx >= 0) updated[idx].amount = Number(budgetForm.amount);
-    else updated.push({ category: budgetForm.category, amount: Number(budgetForm.amount) });
-    setBudgets(updated);
+    const existing = budgets.find(b => b.category === budgetForm.category);
+    if(existing) {
+      await updateDoc(doc(db, 'budgets', existing.id), { amount: Number(budgetForm.amount) });
+    } else {
+      await addDoc(collection(db, 'budgets'), { category: budgetForm.category, amount: Number(budgetForm.amount) });
+    }
     setShowBudgetModal(false);
   };
 
-  const handleIncomeSubmit = (e) => {
+  const handleIncomeSubmit = async (e) => {
     e.preventDefault();
-    const updated = [...incomeGoals];
-    const idx = updated.findIndex(g => g.category === incomeForm.category);
-    if(idx >= 0) updated[idx].amount = Number(incomeForm.amount);
-    else updated.push({ category: incomeForm.category, amount: Number(incomeForm.amount) });
-    setIncomeGoals(updated);
+    const existing = incomeGoals.find(g => g.category === incomeForm.category);
+    if(existing) {
+      await updateDoc(doc(db, 'incomeGoals', existing.id), { amount: Number(incomeForm.amount) });
+    } else {
+      await addDoc(collection(db, 'incomeGoals'), { category: incomeForm.category, amount: Number(incomeForm.amount) });
+    }
     setShowIncomeModal(false);
   };
 
-  const handleMemberSubmit = (e) => {
+  const handleMemberSubmit = async (e) => {
     e.preventDefault();
-    setMembers([...members, { id: uuidv4(), name: memberForm.name, role: memberForm.role }]);
+    await addDoc(collection(db, 'members'), { name: memberForm.name, role: memberForm.role });
     setShowMemberModal(false);
     setMemberForm({ name: '', role: 'Vợ/Chồng' });
   };
 
-  const handleDebtSubmit = (e) => {
+  const handleDebtSubmit = async (e) => {
     e.preventDefault();
-    setDebts([...debts, { id: uuidv4(), name: debtForm.name, amount: Number(debtForm.amount), monthlyPayment: Number(debtForm.monthlyPayment) }]);
+    await addDoc(collection(db, 'debts'), { name: debtForm.name, amount: Number(debtForm.amount), monthlyPayment: Number(debtForm.monthlyPayment) });
     setShowDebtModal(false);
     setDebtForm({ name: '', amount: '', monthlyPayment: '' });
   };
@@ -396,8 +415,8 @@ export default function App() {
                 <div className={`tx-amount ${tx.type==='income'?'text-success':'text-danger'}`}>
                   {tx.type==='income'?'+':'-'}{formatCur(tx.amount)}
                 </div>
-                <button className="btn-text text-danger" onClick={() => {
-                  if(confirm('Xoá giao dịch này?')) setTransactions(transactions.filter(t => t.id!==tx.id));
+                <button className="btn-text text-danger" onClick={async () => {
+                  if(confirm('Xoá giao dịch này?')) await deleteDoc(doc(db, 'transactions', tx.id));
                 }}><Trash2 size={18}/></button>
               </div>
             </div>
@@ -424,11 +443,11 @@ export default function App() {
           if(pct >= 90) color = 'var(--danger-color)'; else if(pct >= 75) color = 'var(--warning-color)';
           
           return (
-            <div key={b.category} className="budget-card glass">
+            <div key={b.id} className="budget-card glass">
               <div className="budget-header">
                 <div className="budget-title"><Icon size={20} color={cat.color}/> {cat.label}</div>
-                <button className="btn-text text-danger" onClick={() => {
-                  if(confirm('Xoá ngân sách?')) setBudgets(budgets.filter(x => x.category!==b.category));
+                <button className="btn-text text-danger" onClick={async () => {
+                  if(confirm('Xoá ngân sách?')) await deleteDoc(doc(db, 'budgets', b.id));
                 }}><Trash2 size={18}/></button>
               </div>
               <div className="budget-progress"><div className="budget-progress-bg"><div className="budget-progress-fill" style={{width: `${pct}%`, backgroundColor: color}}></div></div></div>
@@ -456,11 +475,11 @@ export default function App() {
           let color = 'var(--success-color)';
           
           return (
-            <div key={g.category} className="budget-card glass">
+            <div key={g.id} className="budget-card glass">
               <div className="budget-header">
                 <div className="budget-title"><Icon size={20} color={cat.color}/> {cat.label}</div>
-                <button className="btn-text text-danger" onClick={() => {
-                  if(confirm('Xoá mục tiêu này?')) setIncomeGoals(incomeGoals.filter(x => x.category!==g.category));
+                <button className="btn-text text-danger" onClick={async () => {
+                  if(confirm('Xoá mục tiêu này?')) await deleteDoc(doc(db, 'incomeGoals', g.id));
                 }}><Trash2 size={18}/></button>
               </div>
               <div className="budget-progress"><div className="budget-progress-bg"><div className="budget-progress-fill" style={{width: `${pct}%`, backgroundColor: color}}></div></div></div>
@@ -507,8 +526,8 @@ export default function App() {
             <div key={d.id} className="budget-card glass">
               <div className="budget-header">
                 <div className="budget-title"><Landmark size={20} color="#ef4444"/> {d.name}</div>
-                <button className="btn-text text-danger" onClick={() => {
-                  if(confirm('Xoá khoản nợ? (Sẽ làm giảm tổng dư nợ)')) setDebts(debts.filter(x => x.id!==d.id));
+                <button className="btn-text text-danger" onClick={async () => {
+                  if(confirm('Xoá khoản nợ? (Sẽ làm giảm tổng dư nợ)')) await deleteDoc(doc(db, 'debts', d.id));
                 }}><Trash2 size={18}/></button>
               </div>
               <div style={{marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem'}}>
@@ -613,8 +632,8 @@ export default function App() {
                 <p style={{fontSize:'0.875rem', color:'var(--text-secondary)'}}>Chi tiêu tháng này</p>
                 <h4 className="text-danger" style={{fontSize:'1.25rem'}}>{formatCur(spending[m.id])}</h4>
               </div>
-              {m.id !== 'admin' && <button className="btn-text text-danger" style={{marginTop:'0.5rem'}} onClick={() => {
-                if(confirm('Xoá thành viên?')) setMembers(members.filter(x => x.id!==m.id));
+              {m.role !== 'Quản trị viên' && <button className="btn-text text-danger" style={{marginTop:'0.5rem'}} onClick={async () => {
+                if(confirm('Xoá thành viên?')) await deleteDoc(doc(db, 'members', m.id));
               }}>Xoá thành viên</button>}
             </div>
           ))}
